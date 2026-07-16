@@ -1,0 +1,19 @@
+apiVersion: networking.vertexchain.io/v1alpha1
+kind: GlobalRateLimit
+metadata:
+  name: gists-edge-limit
+  namespace: vertexchain
+spec:
+  selector:
+    gateway: vertexchain-gateway
+  rules:
+    - path: "/gists"
+      method: "POST"
+      localLimit:
+        burst: 10
+        rate: 5
+        unit: "second"
+      globalLimit:
+        key: "post_gists"
+        requestsPerUnit: 100
+        unit: "minute"

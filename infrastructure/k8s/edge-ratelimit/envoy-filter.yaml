@@ -1,0 +1,98 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: edge-rate-limit-gists
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    # 1. Insert Local Rate Limit Filter before the router
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: "envoy.filters.network.http_connection_manager"
+              subFilter:
+                name: "envoy.filters.http.router"
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.local_ratelimit
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+            stat_prefix: edge_local_rate_limiter
+            token_bucket:
+              max_tokens: 1000
+              tokens_per_fill: 1000
+              fill_interval: 1s
+            filter_enabled:
+              runtime_key: local_rate_limit_enabled
+              default_value:
+                numerator: 100
+                denominator: HUNDRED
+            filter_enforced:
+              runtime_key: local_rate_limit_enforced
+              default_value:
+                numerator: 100
+                denominator: HUNDRED
+            # Descriptors to apply rate limiting locally per-gateway-pod to protect backend from thundering herd
+            descriptors:
+              - entries:
+                  - key: "path"
+                    value: "/gists"
+                  - key: "method"
+                    value: "POST"
+                token_bucket:
+                  max_tokens: 10
+                  tokens_per_fill: 5
+                  fill_interval: 1s
+
+    # 2. Insert Global Rate Limit Filter (communicates with external Redis rate limit service)
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: "envoy.filters.network.http_connection_manager"
+              subFilter:
+                name: "envoy.filters.http.router"
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ratelimit
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+            domain: edge-gateway-limits
+            stage: 0
+            rate_limit_service:
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: outbound|8081||ratelimit.istio-system.svc.cluster.local
+              transport_api_version: V3
+
+    # 3. Configure Route Action to populate descriptors for Global Rate Limiter matching POST /gists
+    - applyTo: HTTP_ROUTE
+      match:
+        context: GATEWAY
+        routeConfiguration:
+          vhost:
+            name: "*:80"
+            route:
+              action: ANY
+      patch:
+        operation: MERGE
+        value:
+          route:
+            rate_limits:
+              - actions:
+                  - request_headers:
+                      header_name: ":path"
+                      descriptor_key: "path"
+                  - request_headers:
+                      header_name: ":method"
+                      descriptor_key: "method"
